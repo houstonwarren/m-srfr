@@ -126,7 +126,7 @@ class TFTarget(eqx.Module):
     def grad(self, params, static, y):
         @jax.value_and_grad
         def loss(_params):
-            return static.log_prob(y).sum()
+            return static.log_prob(y).sum()  # independent so we can sum
            
         return loss(params)
     

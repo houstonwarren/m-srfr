@@ -29,7 +29,6 @@ def matrix_rbf_and_grad(particles, Q, ls=None):
     Qx = dx @ Q  #  inputs scaled by conditioning matrix Q - n * n * d
 
     # # calculate median heuristic - median of squared distances
-    # med_ls = jnp.median(jnp.sum(dx * Qx, axis=-1))
     med_ls = jnp.median(dx * Qx, axis=(0, 1))
     if ls is not None:
         ls *= med_ls
@@ -96,6 +95,39 @@ def matrix_matern12_and_grad(particles, Q, ls=None):
 
     return K, gradK
 
+
+# ------------------------------- MATRIX TO MATRIX KERNELS ------------------------------- #
+def matrix_rbf_and_grad_static_ls(particles, Q, ls):
+    # calculate kernel matrix and gradient
+    Q = 0.5*(Q+Q.T)
+    dx = particles[:, None, :] - particles[None, :, :]  # delta x - n * n * d
+    Qx = dx @ Q  #  inputs scaled by conditioning matrix Q - n * n * d
+
+    # # calculate kernel and gradient
+    dX = jnp.sum(Qx * dx / (2 * ls), axis=-1)# n * n
+    K = jnp.exp(-dX)  # n * n
+    gradK = Qx / ls * K[:,:,None]  # n * n * d
+    return K, gradK
+
+
+def mat2mat_matrix_rbf_and_grad(X, ls=1.):
+    M, R, _ = X.shape
+    X_flat = X.reshape(-1, X.shape[-1])
+    dX_flat = X_flat[:, None, :] - X_flat[None, :, :]
+    med_ls = jnp.median(dX_flat**2, axis=(0, 1))
+    ls *= med_ls
+
+    # calculate kernel matrix and gradient over matrices
+    Ks, gradKs = jax.vmap(
+        lambda m1: jax.vmap(
+            lambda m2: ()
+        )
+    )
+
+    K, gradK = matrix_rbf_and_grad(X_flat, jnp.eye(X_flat.shape[-1]), ls)
+    K = K.reshape(M, M, R, R)
+
+
 # -------------------------------------- MMD KERNELS ------------------------------------- #
 def energy_dist(dw, i, j):
     return dw[i, j] - 0.5 * dw[i, i] - 0.5 * dw[j, j]
@@ -144,7 +176,7 @@ def mmd_k_and_grad(X, ls=1.):
     # calculate gradient of kernel matrix
     @jax.grad
     def gradK(_X):
-        return K_mmd(_X, ls, ls_mmd).sum() / 2 
+        return -K_mmd(_X, ls, ls_mmd).sum() / 2  # negative as we want \nabla_w_j k(w_i, w_j)
     K_grad = gradK(X)
 
     return K, K_grad

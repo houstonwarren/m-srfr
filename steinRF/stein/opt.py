@@ -49,7 +49,7 @@ def _asvgd(
         K, K_grad = K_k_grad(particles, jnp.eye(d), ls=ls)
 
         pull = _gamma * K @ particle_grads
-        repulse = -1 * K_grad.sum(axis=0)
+        repulse = K_grad.sum(axis=1)
         svgd_grads = (pull + repulse) / R
         return -svgd_grads
 
@@ -125,7 +125,7 @@ def fsvgd(
         K, K_grad = K_k_grad(particles, jnp.eye(d), ls=ls)
 
         pull = _gamma * K @ particle_grads
-        repulse = -1 *  alpha * K_grad.sum(axis=0)
+        repulse = alpha * K_grad.sum(axis=1)
         srfr_grads = (pull + repulse) / K.sum(axis=1, keepdims=True)
 
         return -srfr_grads
@@ -208,7 +208,7 @@ def msvgd(
 
         # calculate forces
         pull = _gamma * jnp.einsum("ij,jrd->ird", K, particle_grads)
-        repulse =  -1 * alpha * K_grad
+        repulse = alpha * K_grad
         msrfr_grads = (pull + repulse) / K.shape[0]
         # mar_srfr_grads = (pull + repulse) / K.sum(axis=1, keepdims=True) 
 
@@ -290,7 +290,7 @@ def msvgd2(
 
         # calculate forces
         pull = _gamma * jnp.einsum("ij,jrd->ird", K, particle_grads)
-        repulse =  -1 * alpha * K_grad
+        repulse = alpha * K_grad
         msrfr_grads = (pull + repulse) / K.shape[0]
         # mar_srfr_grads = (pull + repulse) / K.sum(axis=1, keepdims=True) 
 
