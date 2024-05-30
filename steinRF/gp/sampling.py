@@ -73,5 +73,4 @@ def sample_rff(key, R, d, dist="normal", sampling="qmc"):
     else:
         raise NotImplementedError(f"Unknown distribution {dist}")
 
-    b = (halton_samples(key, R, 1) * 2 * jnp.pi).reshape(-1)
-    return w, b
+    return w

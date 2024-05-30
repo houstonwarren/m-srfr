@@ -132,6 +132,21 @@ def loss_convergence(criteria_fn, losses, patience, loss_tol=1e-5):
     return criteria_fn(losses, loss_tol)
 
 
+def train_test_split(key, X, y, test_size=0.2):
+    if isinstance(test_size, float):
+        n = X.shape[0]
+        n_test = int(n * test_size)
+    else:
+        n_test = test_size
+    
+    key, subkey = jax.random.split(key)
+    indices = jax.random.permutation(subkey, jnp.arange(n))
+    # return indices
+    X_train, y_train = X[indices[n_test:]], y[indices[n_test:]]
+    X_test, y_test = X[indices[:n_test]], y[indices[:n_test]]
+
+    return X_train, X_test, y_train, y_test
+
 # -------------------------------------- EVALUATION -------------------------------------- #
 def rescale(scaler, y):
     return jnp.array(

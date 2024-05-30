@@ -18,7 +18,8 @@ __all__ = [
     'matrix_rbf_and_grad',
     'matrix_matern32_and_grad',
     'matrix_matern12_and_grad',
-    'mmd_k_and_grad'
+    'mmd_k_and_grad',
+    'distrib_matrix_rbf_and_grad'
 ]
 
 # ------------------------------------- BASIC KERNELS ------------------------------------ #
@@ -96,36 +97,29 @@ def matrix_matern12_and_grad(particles, Q, ls=None):
     return K, gradK
 
 
-# ------------------------------- MATRIX TO MATRIX KERNELS ------------------------------- #
-def matrix_rbf_and_grad_static_ls(particles, Q, ls):
-    # calculate kernel matrix and gradient
+# --------------------------------- DISTRIBUTION KERNELS --------------------------------- #
+@jax.jit
+def distrib_matrix_rbf_and_grad(X, ls=None):
+    Q = jnp.eye(X.shape[-1])
     Q = 0.5*(Q+Q.T)
-    dx = particles[:, None, :] - particles[None, :, :]  # delta x - n * n * d
-    Qx = dx @ Q  #  inputs scaled by conditioning matrix Q - n * n * d
+    dX = X[:, None, :, None, :] - X[None, :, None, :, :]
+    Qx = jnp.einsum('ijklp, pq -> ijklq', dX, Q)
 
-    # # calculate kernel and gradient
-    dX = jnp.sum(Qx * dx / (2 * ls), axis=-1)# n * n
-    K = jnp.exp(-dX)  # n * n
-    gradK = Qx / ls * K[:,:,None]  # n * n * d
+    # calculate median heuristic - median of squared distances (over all samples)
+    med_ls = jnp.median(dX * Qx, axis=(0, 1, 2, 3))
+    if ls is not None:
+        ls *= med_ls
+    else:
+        ls = med_ls
+
+    # calculate kernel and gradient
+    dX = jnp.sum(Qx * dX / (2 * ls), axis=-1)
+    K = jnp.exp(-dX)  # m * m * n * n
+
+    gradK = Qx / ls * K[..., None]
+    gradK = gradK.sum(axis=-2) # summing over j in k(w_i, w_j)
+
     return K, gradK
-
-
-def mat2mat_matrix_rbf_and_grad(X, ls=1.):
-    M, R, _ = X.shape
-    X_flat = X.reshape(-1, X.shape[-1])
-    dX_flat = X_flat[:, None, :] - X_flat[None, :, :]
-    med_ls = jnp.median(dX_flat**2, axis=(0, 1))
-    ls *= med_ls
-
-    # calculate kernel matrix and gradient over matrices
-    Ks, gradKs = jax.vmap(
-        lambda m1: jax.vmap(
-            lambda m2: ()
-        )
-    )
-
-    K, gradK = matrix_rbf_and_grad(X_flat, jnp.eye(X_flat.shape[-1]), ls)
-    K = K.reshape(M, M, R, R)
 
 
 # -------------------------------------- MMD KERNELS ------------------------------------- #
