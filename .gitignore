@@ -172,3 +172,6 @@ experiments/ani2.gif
 
 */scratch.py
 steinRF/scratch.py
+
+# datasets
+experiments/ocean/data/ocean.csv
