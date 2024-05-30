@@ -19,7 +19,6 @@ from tinygp.helpers import JAXArray
 # from steinRF.utils import stabilize
 
 
-
 # --------------------------------------- BASIC GP --------------------------------------- #
 class GP(eqx.Module):
     kernel: eqx.Module
@@ -39,21 +38,8 @@ class GP(eqx.Module):
     def _diag(self):
         return jnp.exp(self.diag)
 
-    @partial(jax.jit, static_argnums=(2,))
+    @eqx.filter_jit
     def nll(self, y, solver="chol"):
-        return cond(solver == "chol", self.chol_nll, self.full_nll, y)
-
-    @jit
-    def full_nll(self, y):
-        K = self.kernel(self.X, self.X) + jnp.eye(self.X.shape[0]) * self._diag
-        n = y.shape[0]
-        term1 = 0.5 * jnp.dot(y.T, jnp.linalg.solve(K, y))
-        term2 = 0.5 * jnp.linalg.slogdet(K)[1]
-        term3 = 0.5 * n * jnp.log(2 * jnp.pi)
-        return term1 + term2 + term3
-
-    @jit
-    def chol_nll(self, y):
         K = self.kernel(self.X, self.X) + jnp.eye(self.X.shape[0]) * self._diag
         n = y.shape[0]
         L = jnp.linalg.cholesky(K)
@@ -63,25 +49,7 @@ class GP(eqx.Module):
         term3 = 0.5 * n * jnp.log(2 * jnp.pi)
         return term1 + term2 + term3
 
-    @partial(jax.jit, static_argnums=(3,))
-    def condition(self, y, X_test, solver="chol"):
-        return cond(solver == "chol", self.chol_condition, self.full_condition, y, X_test)
-
-    @jit
-    def full_condition(self, y, X_test):
-        K = self.kernel(self.X, self.X) + jnp.eye(self.X.shape[0]) * self._diag
-        K_star = self.kernel(self.X, X_test)
-        K_star_star = self.kernel(X_test, X_test) + jnp.eye(X_test.shape[0]) * self.diag
-        
-        K_inv = jnp.linalg.inv(K)
-        
-        mu_pred = jnp.dot(K_star.T, jnp.linalg.solve(K, y))
-        sigma_pred = jnp.sqrt(jnp.diag(K_star_star - jnp.dot(K_star.T, jnp.dot(K_inv, K_star))))
-        
-        return jnp.array([mu_pred, sigma_pred])
-
-    @jit
-    def chol_condition(self, y, X_test):
+    def condition_cov(self, y, X_test):
         K = self.kernel(self.X, self.X) + jnp.eye(self.X.shape[0]) * self._diag
         K_star = self.kernel(self.X, X_test)
         K_star_star = self.kernel(X_test, X_test) + jnp.eye(X_test.shape[0]) * self._diag
@@ -91,19 +59,29 @@ class GP(eqx.Module):
         
         mu_pred = jnp.dot(K_star.T, alpha)
         v = jnp.linalg.solve(L, K_star)
-        sigma_pred = jnp.sqrt(jnp.diag(K_star_star - jnp.dot(v.T, v)))
+        v = K_star_star - jnp.dot(v.T, v)
         
-        return jnp.array([mu_pred, sigma_pred])
+        return (mu_pred, v)
 
-    @partial(jax.jit, static_argnums=(3,))
-    def __call__(self, y, X_test, solver="full"):
-        mu, sigma = cond(solver == "chol", self.full_condition, self.chol_condition, y, X_test)
+    @eqx.filter_jit
+    def condition(self, y, X_test):
+        mu, V = self.condition_cov(y, X_test)
+        sigma = jnp.sqrt(jnp.diag(V))
 
-        # mu, sigma = jnp.where(
-        #     solver == "chol", self.chol_condition(y, X_test), self.condition(y, X_test)
-        # )
         return mu, sigma
 
+    @eqx.filter_jit
+    def nlpd(self, y_train, X_test, y_test):
+        mu, cov = self.condition_cov(y_train, X_test)
+        cov = cov + jnp.eye(cov.shape[0]) * self._diag
+        L = jnp.linalg.cholesky(cov)
+        p = tfd.MultivariateNormalTriL(mu, L)
+
+        return -p.log_prob(y_test)
+
+    @eqx.filter_jit
+    def __call__(self, y, X_test):
+        return self.condition(y, X_test)
 
 # -------------------------------------- LOW RANK GP ------------------------------------- #
 class LowRankGP(eqx.Module):
@@ -128,13 +106,8 @@ class LowRankGP(eqx.Module):
     def _diag(self):
         return jnp.exp(self.diag)
 
-    @partial(jit, static_argnums=(2,))
-    def nll(self, y, solver="chol"):
-        # return cond(solver == "chol", self.chol_nll, self.chol_nll, y)
-        return self.chol_nll(y)
-
     @eqx.filter_jit
-    def chol_nll(self, y: JAXArray) -> JAXArray:
+    def nll(self, y: JAXArray) -> JAXArray:
         diag = self._diag
         y_diff = y - self.mean(self.X)
         phiX = self.kernel.phi(self.X)
@@ -151,7 +124,7 @@ class LowRankGP(eqx.Module):
         return -lml
 
     @eqx.filter_jit
-    def condition(self, y_train, X_test):
+    def condition_cov(self, y_train, X_test):
         y_diff = y_train - self.mean(self.X)
         phiXt = self.kernel.phi(X_test)
         phiX = self.kernel.phi(self.X)
@@ -168,9 +141,24 @@ class LowRankGP(eqx.Module):
         R_phixt = jnp.linalg.solve(R, phiXt.T)
         V = R_phixt.T @ R_phixt * self._diag + self._diag
         # V = R_phixt.T @ R_phixt
+        
+        return mu, V
+
+    @eqx.filter_jit
+    def condition(self, y_train, X_test):
+        mu, V = self.condition_cov(y_train, X_test)
         sigma = jnp.sqrt(jnp.diag(V))
 
         return mu, sigma
+    
+    @eqx.filter_jit
+    def nlpd(self, y_train, X_test, y_test):
+        mu, cov = self.condition_cov(y_train, X_test)
+        cov = cov + jnp.eye(cov.shape[0]) * self._diag
+        L = jnp.linalg.cholesky(cov)
+        p = tfd.MultivariateNormalTriL(mu, L)
+
+        return -p.log_prob(y_test)
 
     # @partial(eqx.filter_jit, static_argnums=(4,))
     def __call__(self, y_train, X_test, diag=jnp.float32(0.)):
@@ -229,7 +217,7 @@ class MixGP(eqx.Module):
         return -lml
 
     @eqx.filter_jit
-    def single_condition(
+    def single_condition_cov(
         self, y_train: JAXArray,
         Xtest: JAXArray,
         phiX: JAXArray, 
@@ -251,19 +239,36 @@ class MixGP(eqx.Module):
         # variance calculation
         R_phixt = jnp.linalg.solve(R, phiXt.T)
         V = R_phixt.T @ R_phixt * self._diag + self._diag
+
+        return mu, V
+
+    @eqx.filter_jit
+    def single_condition(
+        self, y_train: JAXArray,
+        Xtest: JAXArray,
+        phiX: JAXArray, 
+        phiXt: JAXArray, 
+        diag: float
+    ) -> JAXArray:
+        mu, V = self.single_condition_cov(y_train, Xtest, phiX, phiXt, diag)
         sigma = jnp.sqrt(jnp.diag(V))
 
         return mu, sigma
 
     @eqx.filter_jit
-    def multi_condition(self, y_train: JAXArray, X_test: JAXArray, diag: float) -> JAXArray:
+    def multi_condition_cov(self, y_train: JAXArray, X_test: JAXArray, diag: float) -> JAXArray:
         PhiX = self.kernel.phi(self.X)
         PhiXt = self.kernel.phi(X_test)
-        # return self.single_condition(y_train, PhiX[2, :, :], PhiXt[2, :, :])
-        mus, sds = vmap(self.single_condition, (None, None, 0, 0, None))(
+        mus, Vs = vmap(self.single_condition_cov, (None, None, 0, 0, None))(
             y_train, X_test, PhiX, PhiXt, diag
         )
-        return mus, sds
+        return mus, Vs
+
+    @eqx.filter_jit
+    def multi_condition(self, y_train: JAXArray, X_test: JAXArray, diag: float) -> JAXArray:
+        mus, Vs = self.multi_condition_cov(y_train, X_test, diag)
+        sigmas = jnp.sqrt(jnp.diagonal(Vs, axis1=1, axis2=2))
+        return mus, sigmas
 
     @partial(jax.jit, static_argnames=('diag',))
     def condition(self, key, y_train, X_test, n_samples=100, diag=None):
@@ -274,12 +279,28 @@ class MixGP(eqx.Module):
         dists = tfd.MultivariateNormalDiag(mus, sds)
         samples = dists.sample(n_samples, seed=key).reshape(-1, X_test.shape[0])
         return jnp.nanmean(samples, axis=0), jnp.nanstd(samples, axis=0)
+    
+    # @eqx.filter_jit
+    def nlpd(self, y_train, X_test, y_test, diag=None):
+        if diag is None:
+            diag = self._diag
+        mus, covs = self.multi_condition_cov(y_train, X_test, diag)
+        covs = covs + jnp.eye(covs.shape[1]) * diag
+        L_covs = jnp.linalg.cholesky(covs)
+        gaussians = tfd.MultivariateNormalTriL(mus, L_covs)
+        
+        m = mus.shape[0]
+        mixture = tfd.MixtureSameFamily(
+            mixture_distribution=tfd.Categorical(probs=jnp.ones(m) / m),
+            components_distribution=gaussians
+        )
+
+        return -mixture.log_prob(y_test)
 
     # @partial(eqx.filter_jit, static_argnums=(4,))
     def __call__(self, y_train, X_test):
         # diag = cond(diag == 0., lambda: self.diag, lambda: diag)
         return self.condition(y_train, X_test)
-
 
 
 # ------------------------------------ MEAN FUNCTIONS ------------------------------------ #

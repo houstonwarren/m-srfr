@@ -17,7 +17,7 @@ from steinRF.stein.kernels import *
 
 
 # --------------------------------- OPTAX IMPLEMENTATION --------------------------------- #
-def mar_srfr(gp, target, y, epochs, kernel="mmd", **kwargs):
+def msrfr(gp, target, y, epochs, kernel="mmd", **kwargs):
     theta = kwargs.get("theta", {})  # target dist parameters, if any
 
     #### annealing schedule
@@ -52,7 +52,7 @@ def mar_srfr(gp, target, y, epochs, kernel="mmd", **kwargs):
 
     ###### define an svgd step
     @eqx.filter_jit
-    def mar_srfr_step(
+    def msrfr_step(
         _all_params: Tuple[eqx.Module, eqx.Module], 
         opt_state: optax.OptState,
     ) -> Tuple[
@@ -77,7 +77,7 @@ def mar_srfr(gp, target, y, epochs, kernel="mmd", **kwargs):
     print_iter = kwargs.get("print_iter", 25)
     loss_vals = [-target.score(params, static, y, **theta)]
     for epoch in range(epochs):
-        all_params, opt_state, loss = mar_srfr_step(all_params, opt_state)
+        all_params, opt_state, loss = msrfr_step(all_params, opt_state)
         loss_vals.append(loss)
 
         # # print output

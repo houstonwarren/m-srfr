@@ -16,7 +16,7 @@ from steinRF.gp.training import fitgp, train_with_restarts
 from steinRF.stein.targets import NLLTarget, PriorNLLTarget, TFTarget
 from steinRF.stein.srfr import srfr
 from steinRF.stein.sm_srfr import sm_srfr
-from steinRF.stein.mar_srfr import mar_srfr
+from steinRF.stein.msrfr import msrfr
 
 
 __all__ = [
@@ -441,7 +441,7 @@ def build_train_mix_rff(key, X_tr, y_tr, diag, q, R, alpha, epochs, lr, **kwargs
             target = PriorNLLTarget(prior=prior)
 
         # Train the model
-        gp, gp_losses = mar_srfr(
+        gp, gp_losses = msrfr(
             gp_pre, target, y_tr, lr=lr, epochs=epochs, alpha=alpha, **kwargs
         )
 
@@ -495,7 +495,7 @@ def build_train_nmix_rff(key, X_tr, y_tr, diag, q, R, alpha, epochs, lr, **kwarg
             target = PriorNLLTarget(prior=prior)
 
         # Train the model
-        gp, gp_losses = mar_srfr(
+        gp, gp_losses = msrfr(
             gp_pre, target, y_tr, lr=lr, epochs=epochs, alpha=alpha, **kwargs
         )
 
