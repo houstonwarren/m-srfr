@@ -39,7 +39,7 @@ class GP(eqx.Module):
         return jnp.exp(self.diag)
 
     @eqx.filter_jit
-    def nll(self, y, solver="chol"):
+    def nll(self, y):
         K = self.kernel(self.X, self.X) + jnp.eye(self.X.shape[0]) * self._diag
         n = y.shape[0]
         L = jnp.linalg.cholesky(K)
@@ -71,11 +71,14 @@ class GP(eqx.Module):
         return mu, sigma
 
     @eqx.filter_jit
-    def nlpd(self, y_train, X_test, y_test):
-        mu, cov = self.condition_cov(y_train, X_test)
-        cov = cov + jnp.eye(cov.shape[0]) * self._diag
-        L = jnp.linalg.cholesky(cov)
-        p = tfd.MultivariateNormalTriL(mu, L)
+    def nlpd(self, y_train, X_test, y_test, cov=False):
+        if cov:
+            mu, cov = self.condition_cov(y_train, X_test)
+            L = jnp.linalg.cholesky(cov)
+            p = tfd.MultivariateNormalTriL(mu, L)
+        else:
+            mu, sigma = self.condition(y_train, X_test)
+            p = tfd.MultivariateNormalDiag(mu, sigma)
 
         return -p.log_prob(y_test)
 
@@ -152,11 +155,14 @@ class LowRankGP(eqx.Module):
         return mu, sigma
     
     @eqx.filter_jit
-    def nlpd(self, y_train, X_test, y_test):
-        mu, cov = self.condition_cov(y_train, X_test)
-        cov = cov + jnp.eye(cov.shape[0]) * self._diag
-        L = jnp.linalg.cholesky(cov)
-        p = tfd.MultivariateNormalTriL(mu, L)
+    def nlpd(self, y_train, X_test, y_test, cov=False):
+        if cov:
+            mu, cov = self.condition_cov(y_train, X_test)
+            L = jnp.linalg.cholesky(cov)
+            p = tfd.MultivariateNormalTriL(mu, L)
+        else:
+            mu, sigma = self.condition(y_train, X_test)
+            p = tfd.MultivariateNormalDiag(mu, sigma)
 
         return -p.log_prob(y_test)
 
@@ -189,8 +195,8 @@ class MixGP(eqx.Module):
     def _diag(self):
         return jnp.exp(self.diag)
 
-    @partial(jit, static_argnums=(2,))
-    def nll(self, y: JAXArray, solver="chol") -> JAXArray:
+    @eqx.filter_jit
+    def nll(self, y: JAXArray) -> JAXArray:
         return self.multi_nll(y).mean()
 
     @eqx.filter_jit
@@ -269,25 +275,46 @@ class MixGP(eqx.Module):
         mus, Vs = self.multi_condition_cov(y_train, X_test, diag)
         sigmas = jnp.sqrt(jnp.diagonal(Vs, axis1=1, axis2=2))
         return mus, sigmas
+    
+    @partial(jax.jit, static_argnames=('diag',))
+    def mixture_dist(self, y_train, X_test, diag=None):
+        if diag is None:
+            diag = self._diag
+        mus, sds = self.multi_condition(y_train, X_test, diag)
+        gaussians = tfd.MultivariateNormalDiag(mus, sds)
+        m = mus.shape[0]
+        mixture = tfd.MixtureSameFamily(
+            mixture_distribution=tfd.Categorical(probs=jnp.ones(m) / m),
+            components_distribution=gaussians
+        )
+        return mixture
 
     @partial(jax.jit, static_argnames=('diag',))
-    def condition(self, key, y_train, X_test, n_samples=100, diag=None):
+    def condition(self, y_train, X_test, diag=None):
+    # def condition(self, key, y_train, X_test, n_samples=100, diag=None):
         if diag is None:
             diag = self._diag
-        # return self.multi_condition(y_train, X_test, diag)
         mus, sds = self.multi_condition(y_train, X_test, diag)
-        dists = tfd.MultivariateNormalDiag(mus, sds)
-        samples = dists.sample(n_samples, seed=key).reshape(-1, X_test.shape[0])
-        return jnp.nanmean(samples, axis=0), jnp.nanstd(samples, axis=0)
+        # dists = tfd.MultivariateNormalDiag(mus, sds)
+        # samples = dists.sample(n_samples, seed=key).reshape(-1, X_test.shape[0])
+        # return jnp.nanmean(samples, axis=0), jnp.nanstd(samples, axis=0)
+        gaussians = tfd.MultivariateNormalDiag(mus, sds)
+        m = mus.shape[0]
+        mixture = tfd.MixtureSameFamily(
+            mixture_distribution=tfd.Categorical(probs=jnp.ones(m) / m),
+            components_distribution=gaussians
+        )
+        return mixture.mean(), mixture.stddev()
     
     # @eqx.filter_jit
-    def nlpd(self, y_train, X_test, y_test, diag=None):
-        if diag is None:
-            diag = self._diag
-        mus, covs = self.multi_condition_cov(y_train, X_test, diag)
-        covs = covs + jnp.eye(covs.shape[1]) * diag
-        L_covs = jnp.linalg.cholesky(covs)
-        gaussians = tfd.MultivariateNormalTriL(mus, L_covs)
+    def nlpd(self, y_train, X_test, y_test, cov=False):
+        if cov:
+            mus, covs = self.multi_condition_cov(y_train, X_test, self._diag)
+            L_covs = jnp.linalg.cholesky(covs)
+            gaussians = tfd.MultivariateNormalTriL(mus, L_covs)
+        else:
+            mus, sds = self.multi_condition(y_train, X_test, self._diag)
+            gaussians = tfd.MultivariateNormalDiag(mus, sds)
         
         m = mus.shape[0]
         mixture = tfd.MixtureSameFamily(

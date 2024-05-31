@@ -15,7 +15,6 @@ from steinRF.gp.training import fitgp, train_with_restarts
 
 from steinRF.stein.targets import NLLTarget, PriorNLLTarget, TFTarget
 from steinRF.stein.srfr import srfr
-from steinRF.stein.sm_srfr import sm_srfr
 from steinRF.stein.msrfr import msrfr
 
 
@@ -28,10 +27,6 @@ __all__ = [
     'build_srf',
     "build_train_srf",
     'build_train_nsrf',
-    "build_train_smk",
-    "build_train_ssmk",
-    "build_train_srf_smk",
-    "build_srf_smk",
     'build_train_mix_rff',
     'build_mix_rff',
     'build_train_nmix_rff',
@@ -267,132 +262,6 @@ def build_train_nsrf(key, X_tr, y_tr, R, diag, epochs, lr, alpha, **kwargs):
     
         return gp, gp_losses
     
-    restarts = kwargs.pop("restarts", 1)
-    best_gp, best_loss = train_with_restarts(key, _train, restarts)
-
-    return best_gp, best_loss
-
-
-# ------------------------------------------ SMK ----------------------------------------- #
-def build_smk(key, X_tr, y_tr, diag, q, mean=None, from_data=False, init_ls=True):
-    d = X_tr.shape[-1]
-    dX = X_tr[:, None, :] - X_tr[None, :, :]
-    if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
-    else:
-        ls_init = jnp.ones(d)
-
-    # Initialize model with current hyperparameters
-    k = SMK(m=q, d=d)
-    if from_data:
-        k = k.initialize_from_data(key, X_tr, y_tr)
-    k = Transform(ARD(ls_init), k)
-    
-    # kernel and gp initialization
-    gp_pre = GP(k, X_tr, diag=diag, mean=mean)
-    return gp_pre
-
-
-def build_train_smk(key, X_tr, y_tr, diag, m, epochs, lr, **kwargs):
-    # extract kwargs
-    to_train = kwargs.pop(
-        "to_train", lambda t: [
-            t.kernel.kernel.w, t.kernel.kernel.u, t.kernel.kernel.l, 
-            t.kernel.transform.scale
-        ]
-    )
-    mean = kwargs.pop("mean", None)
-    from_data = kwargs.pop("from_data", True)
-    init_ls = kwargs.pop("init_ls", True)
-
-    def _train(subkey):
-        gp_pre = build_smk(
-            subkey, X_tr, y_tr, diag, m, mean=mean, 
-            from_data=from_data, init_ls=init_ls
-        )
-
-        # Train the model
-        gp, gp_losses = fitgp(
-            gp_pre, y_tr, epochs=epochs, lr=lr, to_train=to_train, **kwargs
-        )
-
-        return gp, gp_losses
-
-    restarts = kwargs.pop("restarts", 1)
-    best_gp, best_loss = train_with_restarts(key, _train, restarts)
-
-    return best_gp, best_loss
-
-
-# -------------------------------------- SPARSE SMK -------------------------------------- #
-def build_train_ssmk(key, X_tr, y_tr, diag, m, p, R, epochs, lr, **kwargs):
-    # extract kwargs
-    d = X_tr.shape[-1]
-    to_train = kwargs.pop(
-        "to_train", lambda t: [
-            t.kernel.kernel.w, t.kernel.kernel.u, t.kernel.kernel.l, 
-            t.kernel.transform.scale
-        ]
-    )
-    mean = kwargs.pop("mean", None)
-
-    def _train(subkey):
-        # Initialize model with current hyperparameters
-        k = SparseSMK(p=p, m=m, d=d, R=R, key=subkey)
-        k = k.initialize_from_data(subkey, X=X_tr, y=y_tr)
-        k = Transform(ARD(jnp.ones(d)), k)
-        
-        # kernel and gp initialization
-        gp_pre = MixGP(k, X_tr, diag=diag, mean=mean)
-
-        # Train the model
-        gp, gp_losses = fitgp(
-            gp_pre, y_tr, epochs=epochs, lr=lr, to_train=to_train, **kwargs
-        )
-
-        return gp, gp_losses
-
-    restarts = kwargs.pop("restarts", 1)
-    best_gp, best_loss = train_with_restarts(key, _train, restarts)
-
-    return best_gp, best_loss
-
-
-# ----------------------------- DIVERSIFIED SPECTRAL MIXTURE ----------------------------- #
-def build_srf_smk(subkey, X_tr, y_tr, diag, m, p, R, init_ls=True):
-    # extract kwargs
-    d = X_tr.shape[-1]
-    dX = X_tr[:, None, :] - X_tr[None, :, :]
-    if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
-    else:
-        ls_init = jnp.ones(d)
-
-    # Initialize model with current hyperparameters
-    k = SparseSMK(p=p, m=m, d=d, R=R, key=subkey)
-    k = k.initialize_from_data(subkey, X=X_tr, y=y_tr)
-    k = Transform(ARD(jnp.ones(ls_init)), k)
-    
-    # kernel and gp initialization
-    gp_pre = MixGP(k, X_tr, diag=diag)
-    return gp_pre
-
-
-def build_train_srf_smk(key, X_tr, y_tr, diag, m, p, R, alpha, epochs, lr, **kwargs):
-    init_ls = kwargs.pop("init_ls", True)
-
-    def _train(subkey):
-        gp_pre = build_srf_smk(subkey, X_tr, y_tr, diag, m, p, R, init_ls=init_ls,)
-        
-        # Train the model
-        gp, gp_losses = sm_srfr(
-            gp_pre, y_tr, epochs=epochs, lr=lr, alpha=alpha, **kwargs
-        )
-
-        return gp, gp_losses
-
     restarts = kwargs.pop("restarts", 1)
     best_gp, best_loss = train_with_restarts(key, _train, restarts)
 

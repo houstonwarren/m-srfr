@@ -78,7 +78,7 @@ def msrfr(gp, target, y, epochs, kernel="rbf", **kwargs):
 
     #### run optimization loop
     verbose = kwargs.get("verbose", False)
-    print_iter = kwargs.get("print_iter", 25)
+    print_iter = kwargs.get("print_iter", 100)
     loss_vals = [-target.score(params, static, y, **theta)]
     for epoch in range(epochs):
         all_params, opt_state, loss = msrfr_step(all_params, opt_state)

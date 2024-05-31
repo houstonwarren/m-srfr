@@ -11,8 +11,12 @@ from matplotlib.animation import FuncAnimation
 import itertools
 import pandas as pd
 from jax.tree_util import tree_flatten
+from copy import deepcopy
+from tensorflow_probability.substrates.jax import distributions as tfd
+
 from steinRF.gp.training import trainable
 from steinRF import MixGP
+from steinRF.gp.models import build_train_rff, build_train_mix_rff
 
 
 # --------------------------------------- TRAINING --------------------------------------- #
@@ -322,3 +326,167 @@ def animate_particle_sets(particle_history, n=3, target=None, n_steps=None):
     ani = FuncAnimation(fig, update, frames=frames, repeat=False)
     plt.show()
     return ani
+
+
+# --------------------------- VISUALIZING MIXTURE DISTRIBUTIONS -------------------------- #
+def mvn_to_normal(mvn, inds=None):
+    if inds is not None:
+        return tfd.Normal(mvn.mean()[inds], mvn.stddev()[inds])
+    return tfd.Normal(mvn.mean(), mvn.stddev())
+
+
+def mvn_gmm_to_normal(mvn_gmm, inds=None):
+    if inds is not None:
+        return tfd.MixtureSameFamily(
+            mixture_distribution=tfd.Categorical(probs=mvn_gmm.mixture_distribution.probs),
+            components_distribution=tfd.Normal(
+                loc=mvn_gmm.components_distribution.mean()[..., inds],
+                scale=mvn_gmm.components_distribution.stddev()[..., inds]
+            )
+        )
+    else:
+        return tfd.MixtureSameFamily(
+            mixture_distribution=tfd.Categorical(probs=mvn_gmm.mixture_distribution.probs),
+            components_distribution=tfd.Normal(
+                loc=mvn_gmm.components_distribution.mean(),
+                scale=mvn_gmm.components_distribution.stddev()
+            )
+        )
+
+
+def mixture_pred_dists(key, X, y, params, R=100, test_size=0.2):
+    X_tr, X_test, y_tr, y_test = train_test_split(key, X, y, test_size=test_size)
+
+    # train models    
+    params = deepcopy(params)
+    rff_gp, _ = build_train_rff(key, X_tr, y_tr, R=R, restarts=1, **params["rff"])
+    mix_gp, _ = build_train_mix_rff(key, X_tr, y_tr, R=R, restarts=1, **params["mix_rff"])
+
+    # get predictive distributions
+    rff_mu, rff_sigma = rff_gp.condition(y_tr, X_test)
+    single_dist = tfd.MultivariateNormalDiag(rff_mu, rff_sigma)
+    mixture_dist = mix_gp.mixture_dist(y_tr, X_test)
+    return rff_gp, single_dist, mix_gp, mixture_dist, y_test
+
+
+def plot_kernel_mixture(w_mix, plots_per_row, bw_adjust=1., fontsize=20, title=None):
+    m, R, d = w_mix.shape
+
+    if d % plots_per_row == 0:
+        n_row = d // plots_per_row
+    else:
+        n_row = d // plots_per_row + 1
+
+    width, height = 5*plots_per_row, 5*n_row
+    fig, axs = plt.subplots(n_row, plots_per_row, figsize=(width, height))
+    hue_mat = jnp.repeat(jnp.arange(m), R)
+
+    for i, ax in enumerate(axs.flatten()):
+        if i < d:
+            # plot mixture components
+            w_d = w_mix[..., i]
+            sns.kdeplot(
+                x=w_d.reshape(-1), ax=ax, palette="viridis", hue=hue_mat, bw_adjust=bw_adjust
+            )
+            ax.legend_.remove()
+            ax.set_title(f"$d = {i}$", fontsize=fontsize)
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+
+        else:
+            ax.axis("off")
+
+    if title is not None:
+        fig.suptitle(title, fontsize=fontsize * 1.25)
+
+    fig.text(0.5, 0.04, 'RFF Frequency $\omega$', ha='center', va='center', fontsize=fontsize)
+    fig.text(0.1, 0.5, '$p(\omega)$', ha='center', va='center', rotation='vertical', fontsize=fontsize)
+
+    plt.show()
+    return fig
+
+
+def plot_mixture_preds(
+        p_rff, p_mix, y, n=None, inds=None, 
+        plots_per_row=5, key=jax.random.PRNGKey(0), 
+        standardize=True, bounds=None, title=None,
+        fontsize=20
+    ):
+    
+    # get plotting bounds
+    p_mix_m = p_mix.components_distribution
+    if bounds is None:
+        p_rff_bounds = jnp.array([p_rff.mean() - 3 * p_rff.stddev(), p_rff.mean() + 3 * p_rff.stddev()]).T
+        p_mix_bounds = jnp.array([
+            p_mix_m.mean() - 3 * p_mix_m.stddev(),
+            p_mix_m.mean() + 3 * p_mix_m.stddev()
+        ]).T
+        y_bounds = jnp.array([y, y]).T
+        all_bounds = jnp.concatenate([
+            y_bounds[:, None, :], p_rff_bounds[:, None, :], p_mix_bounds], axis=1
+        )
+        bounds = jnp.stack([all_bounds.min(axis=(1, 2)), all_bounds.max(axis=(1, 2))], axis=-1)
+    else:
+        bounds = jnp.tile(bounds, (y.shape[0], 1))
+
+    # get indices
+    if n is None and inds is None:
+        n = 5
+    if inds is None:
+        inds = jax.random.choice(key, jnp.arange(y.shape[0]), shape=(n,), replace=False)
+    
+    # subset distributions and data
+    y = y[inds]
+    bounds = bounds[inds]
+    x_vals = jnp.linspace(bounds[:, 0], bounds[:, 1], 1000)
+    p_x_rff = tfd.Normal(p_rff.mean()[inds], p_rff.stddev()[inds]).prob(x_vals).T
+    p_x_mix_m = jax.vmap(
+        tfd.Normal(p_mix_m.mean()[:, inds], p_mix_m.stddev()[:, inds]).prob
+    )(x_vals).T
+    p_x_mix = tfd.Normal(p_mix.mean()[inds], p_mix.stddev()[inds]).prob(x_vals).T
+    # p_x_mix = p_x_mix_m.mean(axis=1)
+    
+    m = p_x_mix_m.shape[1]
+
+    # make subplots
+    if n % plots_per_row == 0:
+        n_row = n // plots_per_row
+    else:
+        n_row = n // plots_per_row + 1
+
+    width, height = 5*plots_per_row, 5*n_row
+    fig, axs = plt.subplots(n_row, plots_per_row, figsize=(width, height))
+
+    for i, ax in enumerate(axs.flatten()):
+        y_val = y[i]
+        x_val = x_vals[:, i]
+        Px_rff = p_x_rff[i]
+        Px_mix_m = p_x_mix_m[i] / m
+        Px_mix = p_x_mix[i]
+        if standardize:
+            Px_rff /= Px_rff.max()
+            Px_mix_m /= Px_mix_m.max(axis=1, keepdims=True)
+            Px_mix /= Px_mix.max()
+
+        sns.lineplot(x=x_val, y=Px_rff, label="SSGP $p(y)$", color="blue", ax=ax)
+        for px_m in Px_mix_m:
+            sns.lineplot(x=x_val, y=px_m, color="red", alpha=0.4, ax=ax)
+        sns.lineplot(x=x_val, y=Px_mix, label="M-SRFR $p(y)$", color="red", linestyle="--", ax=ax)
+        vline_height = jnp.max(jnp.concatenate([Px_rff, Px_mix]))
+        ax.vlines(y_val, 0, vline_height, linestyle="--", label="True Value", color="black")
+        if i == 0:
+            ax.legend(loc='lower left', bbox_to_anchor=(0, 1.05), fontsize=fontsize)
+        else:
+            ax.legend().remove()
+
+    if title is not None:
+        fig.suptitle(title, fontsize=fontsize * 1.25)
+
+    fig.text(0.5, 0.08, '$y$', ha='center', va='center', fontsize=fontsize)
+    fig.text(
+        0.1, 0.5, 'Model Predictive $p(y | \\mathbf{X})$', 
+        ha='center', va='center', rotation='vertical', fontsize=fontsize
+    )
+
+    plt.show()
+    return fig
