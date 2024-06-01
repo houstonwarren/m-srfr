@@ -39,40 +39,30 @@ class ARD(eqx.Module):
 
 
 # -------------------------------------- DEEP KERNEL ------------------------------------- #
-class NNTransform(eqx.Module):
+class MLP(eqx.Module):
     layers: list
-    kernel: eqx.Module
+    scale: Float[Array, "d"]
 
-    def __init__(self, key, d_l, kernel=tinygp.kernels.ExpSquared(), **kwargs):
-        self.kernel = kernel
+    def __init__(self, key, in_dim, out_dim, d_hidden=32, n_hidden=3, **kwargs):
+        key, subkey = jax.random.split(key)
 
-        # make NN
-        nn_keys = jax.random.split(key, len(d_l) - 1)
-        layers = []
-        for i in range(len(d_l) - 2):
-            layers.append(eqx.nn.Linear(d_l[i], d_l[i + 1], key=nn_keys[i]))
-        layers.append(eqx.nn.Linear(d_l[-2], d_l[-1], key=nn_keys[-1], use_bias=False))
+        layers = [eqx.nn.Linear(in_dim, d_hidden, key=subkey)]
+        for i in range(n_hidden - 1):
+            key, subkey = jax.random.split(key)
+            layers.append(eqx.nn.Linear(d_hidden, d_hidden, key=subkey))
+        key, subkey = jax.random.split(key)
+        layers.append(eqx.nn.Linear(d_hidden, out_dim, key=subkey, use_bias=False))
         self.layers = layers
+        self.scale = jnp.log(jnp.ones(out_dim))
 
-    def single_eval(self, x):
+    @property
+    def _scale(self):
+        return jnp.exp(self.scale)
+
+    @eqx.filter_jit
+    def __call__(self, x: JAXArray) -> JAXArray:
         for layer in self.layers[:-1]:
             x = jax.nn.relu(layer(x))
         x = self.layers[-1](x)
+        x /= self._scale
         return x
-
-    @eqx.filter_jit
-    def evaluate(self, X):
-        X = jax.vmap(self.single_eval)(X)
-        return X
-
-    @eqx.filter_jit
-    def __call__(self, X1, X2):
-        d_x1 = X1.shape[-1]
-        d_x2 = X2.shape[-1]
-        assert d_x1 == d_x2, "X1 and X2 must have the same number of dimensions"
-
-        # make sure matrices
-        X1 = self.evaluate(X1.reshape(-1, d_x1))
-        X2 = self.evaluate(X2.reshape(-1, d_x2))
-
-        return self.kernel(X1, X2)

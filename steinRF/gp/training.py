@@ -71,7 +71,6 @@ def train_with_restarts(key, model_fn, restarts):
 
 
 def run_optax(y, gp, param_fn, epochs, lr, **kwargs):
-    solver = kwargs.get("solver", "chol")
     update_sampler = kwargs.get("update_sampler", False)
     
     # convergence criteria
@@ -99,7 +98,7 @@ def run_optax(y, gp, param_fn, epochs, lr, **kwargs):
         @jax.value_and_grad
         def loss_fn(params):
             model = eqx.combine(params, _static)
-            return model.nll(y, solver=solver)
+            return model.nll(y)
 
         loss, grads = loss_fn(params)
         # updates, opt_state = opt.update(grads, opt_state)
@@ -145,13 +144,11 @@ def run_optax(y, gp, param_fn, epochs, lr, **kwargs):
                 model = eqx.combine(params, static)
                 return  model, jnp.array(loss_vals)
 
-
     model = eqx.combine(params, static)
     return model, jnp.array(loss_vals)
 
 
 def run_jaxopt(y, gp, param_fn, epochs, **kwargs):
-    solver = kwargs.pop("solver", "chol")
 
     # define an opt step
     params, static = param_fn(gp)
@@ -159,7 +156,7 @@ def run_jaxopt(y, gp, param_fn, epochs, **kwargs):
     @jit
     def loss_fn(_params):
         model = eqx.combine(_params, static)
-        return model.nll(y, solver=solver)
+        return model.nll(y)
 
     # initalize optimizer
     if epochs is None:

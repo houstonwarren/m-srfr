@@ -32,7 +32,6 @@ def min_max_dist(X):
 # -------------------------------------- RFF KERNEL -------------------------------------- #
 class RFF(tinygp.kernels.base.Kernel):
     w: Float[Array, "R d"]
-    b: Float[Array, "R"]
     R: int = eqx.field(static=True)
 
     def __init__(self, 
@@ -46,9 +45,8 @@ class RFF(tinygp.kernels.base.Kernel):
 
         self.R = R        
         if prior is None:
-            self.w, self.b = sample_rff(key, R, d, dist=dist, sampling=sampling)
+            self.w = sample_rff(key, R, d, dist=dist, sampling=sampling)
         else:
-            _, self.b = sample_rff(key, R, d, dist=dist, sampling=sampling)
             self.w = prior
 
     @classmethod
@@ -61,8 +59,8 @@ class RFF(tinygp.kernels.base.Kernel):
     
     @jax.jit
     def phi(self, _X):
-        cos_feats = jnp.sqrt(2) * jnp.cos(_X @ self.w.T + self.b)
-        sin_feats = jnp.sqrt(2) * jnp.sin(_X @ self.w.T + self.b)
+        cos_feats = jnp.sqrt(2) * jnp.cos(_X @ self.w.T)
+        sin_feats = jnp.sqrt(2) * jnp.sin(_X @ self.w.T)
         projected = jnp.concatenate([cos_feats, sin_feats], axis=-1)
 
         return projected / jnp.sqrt(2 * self.R)
@@ -77,7 +75,6 @@ class RFF(tinygp.kernels.base.Kernel):
 # -------------------------------------- RFF KERNEL -------------------------------------- #
 class MixRFF(eqx.Module):
     w: Float[Array, "q R d"]
-    b: Float[Array, "q R"]
     q: int = eqx.field(static=True)
     R: int = eqx.field(static=True)
 
@@ -93,16 +90,10 @@ class MixRFF(eqx.Module):
         self.R = R
         if prior is None:
             keys = jax.random.split(key, self.q)
-            wb = [sample_rff(k, R, d, dist=dist, sampling=sampling) for k in keys]
-            w, b = zip(*wb)
+            w = [sample_rff(k, R, d, dist=dist, sampling=sampling) for k in keys]
             self.w = jnp.array(w)
-            self.b = jnp.array(b)
         else:
-            keys = jax.random.split(key, self.q)
             self.w = prior
-            self.b = jnp.array([
-                sample_rff(k, R, d, dist=dist, sampling=sampling)[1] for k in keys
-            ]).reshape(q, R)
 
     @classmethod
     def initialize_from_data(cls, key, q, R, X):
@@ -113,15 +104,15 @@ class MixRFF(eqx.Module):
         return cls(key, q, R, d, prior=w)
     
     @jax.jit
-    def _phi(self, _X, w, b):
-        cos_feats = jnp.sqrt(2) * jnp.cos(_X @ w.T + b)
-        sin_feats = jnp.sqrt(2) * jnp.sin(_X @ w.T + b)
+    def _phi(self, _X, w):
+        cos_feats = jnp.sqrt(2) * jnp.cos(_X @ w.T)
+        sin_feats = jnp.sqrt(2) * jnp.sin(_X @ w.T)
         projected = jnp.concatenate([cos_feats, sin_feats], axis=-1)
 
         return projected / jnp.sqrt(2 * self.R)
     
     def phi(self, _X):
-        phiX = vmap(self._phi, (None, 0, 0))(_X, self.w, self.b)
+        phiX = vmap(self._phi, (None, 0))(_X, self.w)
 
         return phiX
     
@@ -137,7 +128,6 @@ class MixRFF(eqx.Module):
 # ----------------------------------- NONSTATIONARY RFF ---------------------------------- #
 class NonstationaryRFF(tinygp.kernels.base.Kernel):
     w: Float[Array, "R d2"]
-    b: Float[Array, "R"]
     R: int = eqx.field(static=True)
     d: int = eqx.field(static=True)
 
@@ -146,11 +136,9 @@ class NonstationaryRFF(tinygp.kernels.base.Kernel):
         self.d = d
         
         if prior is None:
-            self.w, _ = sample_rff(key, R, d * 2, dist=dist, sampling=sampling)
-            self.b = sample_rff(key, R * 2, 1, dist=dist, sampling=sampling)[1].reshape(-1)
+            self.w = sample_rff(key, R, d * 2, dist=dist, sampling=sampling)
         else:
             self.w = prior
-            self.b = sample_rff(key, R * 2, 1, dist=dist, sampling=sampling)[1].reshape(-1)
 
     @classmethod
     def initialize_from_data(cls, key, R, X):
@@ -166,12 +154,10 @@ class NonstationaryRFF(tinygp.kernels.base.Kernel):
         d, R = self.d, self.R
         w1 = self.w[:, :d]
         w2 = self.w[:, d:]
-        b1 = self.b[:R]
-        b2 = self.b[R:]
 
         # multiply by sqrt 2?
-        cos_feats = jnp.cos(_X @ w1.T + b1) + jnp.cos(_X @ w2.T + b2) 
-        sin_feats = jnp.sin(_X @ w1.T + b1) + jnp.sin(_X @ w2.T + b2) 
+        cos_feats = jnp.cos(_X @ w1.T) + jnp.cos(_X @ w2.T)
+        sin_feats = jnp.sin(_X @ w1.T) + jnp.sin(_X @ w2.T)
         projected = jnp.concatenate([cos_feats, sin_feats], axis=-1)
 
         return projected / jnp.sqrt(4 * R)
@@ -184,7 +170,6 @@ class NonstationaryRFF(tinygp.kernels.base.Kernel):
 # ------------------------------- NONSTATIONARY MIXTURE RFF ------------------------------ #
 class NMixRFF(eqx.Module):
     w: Float[Array, "q R d2"]
-    b: Float[Array, "q 2R"]
     q: int = eqx.field(static=True)
     d: int = eqx.field(static=True)
     R: int = eqx.field(static=True)
@@ -204,19 +189,11 @@ class NMixRFF(eqx.Module):
         if prior is None:
             keys = jax.random.split(key, self.q)
             self.w = jnp.array([
-                sample_rff(k, R, d * 2, dist=dist, sampling=sampling)[0] for k in keys
+                sample_rff(k, R, d * 2, dist=dist, sampling=sampling) for k in keys
             ])
-            b = [
-                sample_rff(k, R * 2, 1, dist=dist, sampling=sampling)[1].reshape(-1)
-                for k in keys
-            ]
-            self.b = jnp.array(b).reshape(q, 2 * R)
         else:
             keys = jax.random.split(key, self.q)
             self.w = prior
-            self.b = jnp.array([
-                sample_rff(k, 2 * R, d, dist=dist, sampling=sampling)[1] for k in keys
-            ]).reshape(q, 2 * R)
 
     @classmethod
     def initialize_from_data(cls, key, q, R, X):
@@ -228,23 +205,21 @@ class NMixRFF(eqx.Module):
         return cls(key, q, R, d, prior=w)
     
     @jax.jit
-    def _phi(self, _X, w, b):
+    def _phi(self, _X, w):
         d, R = self.d, self.R
         w1 = w[:, :d]
         w2 = w[:, d:]
-        b1 = b[:R]
-        b2 = b[R:]
 
         # multiply by sqrt 2?
-        cos_feats = jnp.cos(_X @ w1.T + b1) + jnp.cos(_X @ w2.T + b2) 
-        sin_feats = jnp.sin(_X @ w1.T + b1) + jnp.sin(_X @ w2.T + b2) 
+        cos_feats = jnp.cos(_X @ w1.T) + jnp.cos(_X @ w2.T) 
+        sin_feats = jnp.sin(_X @ w1.T) + jnp.sin(_X @ w2.T) 
         projected = jnp.concatenate([cos_feats, sin_feats], axis=-1)
 
         return projected / jnp.sqrt(4 * R)
 
     @jax.jit
     def phi(self, _X):
-        phiX = vmap(self._phi, (None, 0, 0))(_X, self.w, self.b)
+        phiX = vmap(self._phi, (None, 0))(_X, self.w)
 
         return phiX
     

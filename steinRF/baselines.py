@@ -164,3 +164,17 @@ def svgp_cross_val(key, X, y, params, n_folds=5, metric=mse):
 
     return np.mean(accuracies)
 
+
+def svgp_nlpd(model, X_test, y_test, cov=False):
+    latent_dist = model(X_test)
+    mu = latent_dist.mean()
+    if cov:
+        cov = latent_dist.covariance()
+        cov = cov + jnp.eye(cov.shape[0]) * model.jitter
+        L = jnp.linalg.cholesky(cov)
+        dist = tfd.MultivariateNormalTriL(loc=mu, scale_tril=L)
+
+    else:
+        dist = tfd.MultivariateNormalDiag(mu, latent_dist.stddev())
+
+    return -dist.log_prob(y_test)
