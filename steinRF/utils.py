@@ -11,6 +11,7 @@ from matplotlib.animation import FuncAnimation
 import itertools
 import pandas as pd
 from jax.tree_util import tree_flatten
+import jax.random as jr
 from copy import deepcopy
 from tensorflow_probability.substrates.jax import distributions as tfd
 
@@ -137,8 +138,8 @@ def loss_convergence(criteria_fn, losses, patience, loss_tol=1e-5):
 
 
 def train_test_split(key, X, y, test_size=0.2):
+    n = X.shape[0]
     if isinstance(test_size, float):
-        n = X.shape[0]
         n_test = int(n * test_size)
     else:
         n_test = test_size
@@ -150,6 +151,16 @@ def train_test_split(key, X, y, test_size=0.2):
     X_test, y_test = X[indices[:n_test]], y[indices[:n_test]]
 
     return X_train, X_test, y_train, y_test
+
+
+def k_fold(key, X, y, n_folds=5):
+    inds = jr.permutation(key, jnp.arange(X.shape[0]))
+    fold_size = X.shape[0] // n_folds
+    for i in range(n_folds):
+        test_inds = inds[i*fold_size:(i+1)*fold_size]
+        train_inds = jnp.concatenate([inds[:i*fold_size], inds[(i+1)*fold_size:]])
+        yield X[train_inds], X[test_inds], y[train_inds], y[test_inds]
+
 
 # -------------------------------------- EVALUATION -------------------------------------- #
 def rescale(scaler, y):
@@ -202,20 +213,12 @@ def metric_model(y, y_pred, y_sd, scaler=None):
     return jnp.array([mod_mse, mod_mae, mod_cal, mod_z])
 
 
-def gp_cross_val(model_fn, key, X, y, params, n_folds=5, metric=mse, shuffle=True):
-    seed = int(key[0])
-    
-    if shuffle:
-        kf = KFold(n_splits=n_folds, random_state=seed, shuffle=shuffle)
-    else:
-        kf = KFold(n_splits=n_folds, shuffle=shuffle)
-    
+def gp_cross_val(model_fn, key, X, y, params, n_folds=5, metric=mse):
     accuracies = []
+    kf = k_fold(key, X, y, n_folds=n_folds)
 
-    for train_index, test_index in kf.split(X):
+    for X_train, X_test, y_train, y_test in kf:
         key, subkey = jax.random.split(key)
-        X_train, X_test = jnp.array(X[train_index]), jnp.array(X[test_index])
-        y_train, y_test = jnp.array(y[train_index]), jnp.array(y[test_index])
 
         gp, _ = model_fn(subkey, X_train, y_train, **params)
         if metric == "nll":
@@ -224,14 +227,11 @@ def gp_cross_val(model_fn, key, X, y, params, n_folds=5, metric=mse, shuffle=Tru
         elif metric == "mae":
             gp_preds = gp.condition(y_train, X_test)[0]
             accuracies.append(mae(y_test, gp_preds))
-        elif isinstance(gp, MixGP):
-            gp_preds = gp.condition(subkey, y_train, X_test)[0]
-            accuracies.append(metric(y_test, gp_preds))
         else:
             gp_preds = gp.condition(y_train, X_test)[0]
             accuracies.append(metric(y_test, gp_preds))
 
-    return np.mean(accuracies)
+    return jnp.mean(jnp.asarray(accuracies))
 
 
 def run_hyperopt(cross_val_func, key, X, y, n_trials, study=None, **model_params):

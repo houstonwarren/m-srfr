@@ -211,7 +211,6 @@ def _msvgd(
         pull = _gamma * jnp.einsum("ijkl, jld -> ikd", K, particle_grads)
         repulse = alpha * K_grad.sum(axis=1)
         msrfr_grads = (pull + repulse) / K.shape[0]
-        # mar_srfr_grads = (pull + repulse) / K.sum(axis=1, keepdims=True) 
 
         return -msrfr_grads
 

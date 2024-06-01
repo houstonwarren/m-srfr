@@ -5,40 +5,39 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
-from tinygp import GaussianProcess
 from tensorflow_probability.substrates.jax import distributions as tfd
 
-from steinRF import GP, LowRankGP, MixGP
-from steinRF.gp.kernels import RFF, NonstationaryRFF, SMK, SparseSMK, MixRFF, NMixRFF
-from steinRF.gp.transforms import ARD, Transform
+from steinRF import LowRankGP, MixGP
+from steinRF.gp.kernels import RFF, MixRFF
+from steinRF.gp.transforms import ARD, MLP, Transform
 from steinRF.gp.training import fitgp, train_with_restarts
 
 from steinRF.stein.targets import NLLTarget, PriorNLLTarget, TFTarget
 from steinRF.stein.srfr import srfr
 from steinRF.stein.msrfr import msrfr
+from steinRF.stein.kernels import pairwise_median
 
 
 __all__ = [
     "build_train_rff",
     'build_rff',
-    'build_train_nrff',
+    'build_deep_rff',
+    'build_train_deep_rff',
     'build_rff_rbf',
     "build_train_rff_rbf", 
     'build_srf',
     "build_train_srf",
-    'build_train_nsrf',
     'build_train_mix_rff',
     'build_mix_rff',
-    'build_train_nmix_rff',
-    'build_nmix_rff'
+    'build_deep_mix_rff',
+    'build_train_deep_mix_rff'
 ]
 
 # ---------------------------------------- RFF RBF --------------------------------------- #
 def build_rff_rbf(key, X_tr, R, diag, mean=None, init_ls=True):
     d = X_tr.shape[-1]
     if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
+        ls_init = pairwise_median(X_tr, X_tr)
     else:
         ls_init = jnp.ones(d)
 
@@ -78,8 +77,7 @@ def build_train_rff_rbf(key, X_tr, y_tr, R, diag, epochs, lr, **kwargs):
 def build_rff(key, X_tr, R, diag, mean=None, w_init=None, from_data=False, init_ls=True):
     d = X_tr.shape[-1]
     if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
+        ls_init = pairwise_median(X_tr, X_tr)
     else:
         ls_init = jnp.ones(d)
 
@@ -125,41 +123,31 @@ def build_train_rff(key, X_tr, y_tr, R, diag, epochs, lr, **kwargs):
     return best_gp, best_loss
 
 
-# ----------------------------------- NONSTATIONARY RFF ---------------------------------- #
-def build_nrff(key, X_tr, R, diag, mean=None, w_init=None, from_data=False, init_ls=True):
-    d = X_tr.shape[-1]
-    if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
-    else:
-        ls_init = jnp.ones(d)
-
+# --------------------------------------- DEEP RFF --------------------------------------- #
+def build_deep_rff(key, X_tr, out_dim, R, diag, mean=None):
     # Initialize model with current hyperparameters
-    k = NonstationaryRFF(key, d=d, R=R)
-    if from_data:
-        k = k.initialize_from_data(key, R, X_tr)
-    k = Transform(ARD(ls_init), k)
-    
-    # kernel and gp initialization
-    if w_init is not None: 
-        k = eqx.tree_at(lambda t: t.kernel.kernel.w, k, w_init)
+    d = X_tr.shape[-1]
+    k = RFF(key, d=out_dim, R=R)
+    mlp = MLP(key, in_dim=d, out_dim=out_dim, d_hidden=32, n_hidden=3)
+    k = Transform(mlp, k)
+
+    # init gp
     gp_pre = LowRankGP(k, X_tr, diag=diag, mean=mean)
     return gp_pre
 
 
-def build_train_nrff(key, X_tr, y_tr, R, diag, epochs, lr, **kwargs):
+def build_train_deep_rff(key, X_tr, y_tr, out_dim, R, diag, epochs, lr, **kwargs):
     # extract kwargs
     to_train = kwargs.pop(
-        "to_train", lambda t: [t.kernel.kernel.w, t.kernel.transform.scale]
+        "to_train", lambda t: [
+            t.kernel.kernel.w, t.kernel.transform.layers, t.kernel.transform.scale
+        ]
     )
-    w_init = kwargs.pop("w_init", None)
     mean = kwargs.pop("mean", None)
-    from_data = kwargs.pop("from_data", True)
-    init_ls = kwargs.pop("init_ls", True)
 
     def _train(subkey):
-        gp_pre = build_nrff(
-            subkey, X_tr, R, diag, mean=mean, w_init=w_init, from_data=from_data, init_ls=init_ls
+        gp_pre = build_deep_rff(
+            subkey, X_tr, out_dim, R, diag, mean=mean,
         )
 
         # Train the model
@@ -180,8 +168,7 @@ def build_train_nrff(key, X_tr, y_tr, R, diag, epochs, lr, **kwargs):
 def build_srf(key, X_tr, R, diag, mean=None, w_init=None, from_data=False, init_ls=True):
     d = X_tr.shape[-1]
     if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
+        ls_init = pairwise_median(X_tr, X_tr)
     else:
         ls_init = jnp.ones(d)
 
@@ -223,57 +210,11 @@ def build_train_srf(key, X_tr, y_tr, R, diag, epochs, lr, alpha, **kwargs):
     return best_gp, best_loss
 
 
-# -------------------------- NONSTATIONARY STEIN RANDOM FEATURES ------------------------- #
-def build_nsrf(key, X_tr, R, diag, mean=None, w_init=None, init_ls=True):
-    d = X_tr.shape[-1]
-    if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
-    else:
-        ls_init = jnp.ones(d)
-
-    # Initialize model with current hyperparameters
-    k = NonstationaryRFF(key, d=d, R=R)
-    k = k.initialize_from_data(key, R, X_tr)
-    k = Transform(ARD(ls_init), k)
-    if w_init is not None: 
-        k = eqx.tree_at(lambda t: t.kernel.kernel.w, k, w_init)
-    gp_pre = LowRankGP(k, X_tr, diag=diag, mean=mean)
-    return gp_pre
-
-
-def build_train_nsrf(key, X_tr, y_tr, R, diag, epochs, lr, alpha, **kwargs):
-    # extract kwargs
-    # lr_min = kwargs.pop("lr_min", 1e-4)
-    w_init = kwargs.pop("w_init", None)
-    mean = kwargs.pop("mean", None)
-    init_ls = kwargs.pop("init_ls", True)
-
-    def _train(subkey):
-        gp_pre = build_nsrf(
-            subkey, X_tr, R, diag, mean=mean, w_init=w_init, init_ls=init_ls
-        )
-
-        # opt = optax.adam(lr)
-        gp, gp_losses = srfr(
-            gp_pre, y_tr, epochs=epochs, method="srfr",
-            alpha=alpha, lr=lr, **kwargs
-        )
-    
-        return gp, gp_losses
-    
-    restarts = kwargs.pop("restarts", 1)
-    best_gp, best_loss = train_with_restarts(key, _train, restarts)
-
-    return best_gp, best_loss
-
-
 # -------------------------------------- MIXTURE GP -------------------------------------- #
 def build_mix_rff(subkey, X_tr, diag, q, R, mean=None, from_data=False, init_ls=True):
     d = X_tr.shape[-1]
     if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
+        ls_init = pairwise_median(X_tr, X_tr)
     else:
         ls_init = jnp.ones(d)
 
@@ -322,33 +263,27 @@ def build_train_mix_rff(key, X_tr, y_tr, diag, q, R, alpha, epochs, lr, **kwargs
     return best_gp, best_loss
 
 
-# --------------------------------- NONSTATIONARY MIXTURE -------------------------------- #
-def build_nmix_rff(subkey, X_tr, diag, q, R, mean=None, from_data=False, init_ls=True):
+# ------------------------------------ DEEP MIXTURE GP ----------------------------------- #
+def build_deep_mix_rff(subkey, X_tr, diag, q, out_dim, R, mean=None):
     d = X_tr.shape[-1]
-    if init_ls:
-        dX = X_tr[:, None, :] - X_tr[None, :, :]
-        ls_init = jnp.median(dX**2, axis=(0, 1))
-    else:
-        ls_init = jnp.ones(d)
-
-    mixrff = NMixRFF(subkey, q=q, R=R, d=d)
-    if from_data:
-        mixrff = mixrff.initialize_from_data(subkey, q=q, R=R, X=X_tr)
-    mixrff = Transform(ARD(ls_init), mixrff)
+    mixrff = MixRFF(subkey, q=q, R=R, d=out_dim)
+    mlp = MLP(subkey, in_dim=d, out_dim=out_dim, d_hidden=32, n_hidden=3)
+    mixrff = Transform(mlp, mixrff)
 
     gp_pre = MixGP(mixrff, X_tr, diag=diag, mean=mean)
     return gp_pre
 
 
-def build_train_nmix_rff(key, X_tr, y_tr, diag, q, R, alpha, epochs, lr, **kwargs):
+def build_train_deep_mix_rff(key, X_tr, y_tr, diag, q, out_dim, R, alpha, epochs, lr, **kwargs):
     mean = kwargs.pop("mean", None)
     prior = kwargs.pop("prior", None)
-    from_data = kwargs.pop("from_data", True)
-    init_ls = kwargs.pop("init_ls", True)
+    gd_params = lambda t: [
+        t.kernel.transform.layers, t.kernel.transform.scale
+    ]
 
     def _train(subkey):
-        gp_pre = build_nmix_rff(
-            subkey, X_tr, diag, q, R, mean, from_data, init_ls=init_ls
+        gp_pre = build_deep_mix_rff(
+            subkey, X_tr, diag, q, out_dim, R, mean,
         )
 
         # prior
@@ -365,7 +300,8 @@ def build_train_nmix_rff(key, X_tr, y_tr, diag, q, R, alpha, epochs, lr, **kwarg
 
         # Train the model
         gp, gp_losses = msrfr(
-            gp_pre, target, y_tr, lr=lr, epochs=epochs, alpha=alpha, **kwargs
+            gp_pre, target, y_tr, lr=lr, epochs=epochs, alpha=alpha,
+            gd_params=gd_params, **kwargs
         )
 
         return gp, gp_losses

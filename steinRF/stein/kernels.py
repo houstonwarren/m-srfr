@@ -22,11 +22,26 @@ __all__ = [
     'distrib_matrix_rbf_and_grad'
 ]
 
+
+@jax.jit
+def pairwise_distance(X1, X2):  # note - not squared distance
+    return jax.vmap(lambda x1: jax.vmap(lambda x2: (x1 - x2))(X2))(X1)
+
+
+@jax.jit
+def pairwise_median(X1, X2):   # note: IS squared distance
+    ls = jnp.median(jax.vmap(
+        lambda x1: jax.vmap(lambda x2: (x1 - x2)**2)(X2)
+    )(X1), axis=(0, 1))
+    return ls
+
+
 # ------------------------------------- BASIC KERNELS ------------------------------------ #
+@jax.jit
 def matrix_rbf_and_grad(particles, Q, ls=None):
     # calculate kernel matrix and gradient
     Q = 0.5*(Q+Q.T)
-    dx = particles[:, None, :] - particles[None, :, :]  # delta x - n * n * d
+    dx = pairwise_distance(particles, particles)  # delta x - n * n * d
     Qx = dx @ Q  #  inputs scaled by conditioning matrix Q - n * n * d
 
     # # calculate median heuristic - median of squared distances
@@ -47,7 +62,7 @@ def matrix_rbf_and_grad(particles, Q, ls=None):
 def matrix_matern32_and_grad(particles, Q, ls=None):
     # Compute delta x - n * n * d
     Q = 0.5 * (Q + Q.T)
-    dx = particles[:, None, :] - particles[None, :, :]  
+    dx = pairwise_distance(particles, particles)
     Qx = dx @ Q  # Scale inputs by conditioning matrix Q - n * n * d
 
     # Calculate median heuristic - median of squared distances
@@ -75,7 +90,7 @@ def matrix_matern32_and_grad(particles, Q, ls=None):
 def matrix_matern12_and_grad(particles, Q, ls=None):
     # Compute delta x - n * n * d
     Q = 0.5 * (Q + Q.T)
-    dx = particles[:, None, :] - particles[None, :, :]  
+    dx = pairwise_distance(particles, particles)
     Qx = dx @ Q  # Scale inputs by conditioning matrix Q - n * n * d
 
     # Calculate median heuristic - median of squared distances
@@ -99,27 +114,58 @@ def matrix_matern12_and_grad(particles, Q, ls=None):
 
 # --------------------------------- DISTRIBUTION KERNELS --------------------------------- #
 @jax.jit
-def distrib_matrix_rbf_and_grad(X, ls=None):
-    Q = jnp.eye(X.shape[-1])
+def pairwise_matrix_rbf_and_grad(p1, p2, ls=1.):
+    # calculate kernel matrix and gradient
+    Q = jnp.eye(p1.shape[-1])
     Q = 0.5*(Q+Q.T)
-    dX = X[:, None, :, None, :] - X[None, :, None, :, :]
-    Qx = jnp.einsum('ijklp, pq -> ijklq', dX, Q)
+    dx = pairwise_distance(p1, p2)  # delta x - n * n * d
+    Qx = dx @ Q  #  inputs scaled by conditioning matrix Q - n * n * d
 
-    # calculate median heuristic - median of squared distances (over all samples)
-    med_ls = jnp.median(dX * Qx, axis=(0, 1, 2, 3))
-    if ls is not None:
-        ls *= med_ls
-    else:
-        ls = med_ls
-
-    # calculate kernel and gradient
-    dX = jnp.sum(Qx * dX / (2 * ls), axis=-1)
-    K = jnp.exp(-dX)  # m * m * n * n
-
-    gradK = Qx / ls * K[..., None]
-    gradK = gradK.sum(axis=-2) # summing over j in k(w_i, w_j)
-
+    # # calculate kernel and gradient
+    dX = jnp.sum(Qx * dx / (2 * ls), axis=-1)# n * n
+    K = jnp.exp(-dX)  # n * n
+    gradK = Qx / ls * K[:,:,None]  # n * n * d
     return K, gradK
+
+
+@jax.jit
+def distrib_matrix_rbf_and_grad(X, ls=None):
+    d = X.shape[-1]
+    med_ls = pairwise_median(X.reshape(-1, d), X.reshape(-1, d))
+    if ls is None:
+        ls = med_ls
+    else:
+        ls *= med_ls
+
+    K, gradK = jax.vmap(
+        lambda x1: jax.vmap(
+            lambda x2: pairwise_matrix_rbf_and_grad(x1, x2, ls)
+        )(X)
+    )(X)
+    
+    gradK = gradK.sum(axis=-2)
+    return K, gradK
+
+    # Q = jnp.eye(X.shape[-1])
+    # Q = 0.5*(Q+Q.T)
+    # dX = X[:, None, :, None, :] - X[None, :, None, :, :]
+    # Qx = jnp.einsum('ijklp, pq -> ijklq', dX, Q)
+
+    # # calculate median heuristic - median of squared distances (over all samples)
+    # med_ls = jnp.median(dX * Qx, axis=(0, 1, 2, 3))
+    # if ls is not None:
+    #     ls *= med_ls
+    # else:
+    #     ls = med_ls
+
+    # # calculate kernel and gradient
+    # dX = jnp.sum(Qx * dX / (2 * ls), axis=-1)
+    # K = jnp.exp(-dX)  # m * m * n * n
+
+    # gradK = Qx / ls * K[..., None]
+    # gradK = gradK.sum(axis=-2) # summing over j in k(w_i, w_j)
+
+    # return K, gradK
 
 
 # -------------------------------------- MMD KERNELS ------------------------------------- #
